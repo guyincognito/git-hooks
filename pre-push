@@ -1,0 +1,161 @@
+#!/usr/bin/env python
+
+"""
+This can be used as a pre-push hook in git. 
+
+This is used to ask the user whether they have checked their commit
+messages and their associated diffs before initiating the push to the
+remote.  If the user does not answer with  "y" or "yes", then the push
+attempt is aborted.  Otherwise, the push will be allowed to go through.
+
+This can be added to a repository by copying this script to
+$GIT_DIR/hooks/pre-push and setting the executable permission.
+
+Alternatively, you can set the core.hooksPath config value by running:
+
+    git config --global --add core.hooksPath "/path/to/githooks"
+
+and then copy this file to that path under the name pre-push and set the
+executable permission.  This allows for using this hook in all of your
+repositories.
+"""
+
+import shlex
+import sys
+import subprocess
+import textwrap
+
+
+def check_yes_answer(answer):
+    """Checks whether answer provided means "yes"
+
+    Args:
+        answer: Input provided by user
+
+    Returns:
+        True if answer means yes
+        False otherwise
+    """
+    return answer in ['y', 'Y', 'yes', 'Yes', 'YES']
+
+def local_branch_rebased(local_ref, remote_ref):
+    """Checks whether set of commits on local branch match remote branch
+
+    Args:
+        local_ref: Name of local reference (the local branch name)
+        remote_ref: Name of remote reference (the remote branch name)
+
+    Returns:
+        True if the current branch has been rebased
+        False otherwise
+    """
+    cmd = 'git log --format=%H origin/master..{ref}'
+
+    # Get list of sha1 values in the local branch
+    local_sha1s = subprocess.check_output(
+        shlex.split(cmd.format(ref=local_ref))).splitlines()
+
+    # Get list of sha1 values in remote branch
+    remote_sha1s = subprocess.check_output(
+        shlex.split(cmd.format(ref=remote_ref))).splitlines()
+
+    rebased = False
+    for l, r in zip(local_sha1s, remote_sha1s):
+        if l == r:
+            continue
+        rebased = True
+        break
+
+    return rebased
+        
+
+exit_val = 0
+
+# <local ref> SP <local sha1> SP <remote ref> SP <remote sha1> LF
+input_line = sys.stdin.readline()
+local_ref, local_sha1, remote_ref, remote_sha1 = input_line.split()
+
+# Check if local branch has been rebased
+rebased = local_branch_rebased(local_ref, remote_ref)
+
+# Since the hook reads from stdin before we prompt the user, the file
+# descriptor was closed.  Re-open it by assigning it a fd from /dev/tty.
+sys.stdin = open('/dev/tty')
+
+# This is a force push
+if rebased:
+    try:
+        answer = raw_input(textwrap.dedent('''\
+            You're about to do a force push to the remote.  If this push
+            is to a branch that's currently pull requested and under
+            review, then did you let the rest of your team know you're
+            about to do this? [y/n]'''))
+    except EOFError:
+        # Since we read from stdin already, we don't want this to
+        # prevent the user from answering the query above
+        answer = raw_input()
+
+    is_yes = check_yes_answer(answer)
+
+    if not is_yes:
+        print
+        print textwrap.dedent('''\
+            Please inform your team before you do a force push.  If
+            you're updating code, please make a commit in the form:
+            
+                "fixup! <commit title to update>"
+
+            You can unstage your changes by running:
+            
+                git reset origin/<your-branch-name>
+                
+            You can then restage your changes and make the appropriate
+            fixup! commits.  Running:
+
+                git add -i <file_name>
+
+            will allow you to incrementally stage your changes and make
+            it easier to separate them out into different commits.
+            
+            If you're just updating a commit message, you should create
+            a squash commit without staging any changes:
+
+                "squash! <commit title to update>"
+
+            This will allow you to update the commit message without
+            having to run a rebase.
+            
+            You can pass the --allow-empty flag to git commit in order
+            to make a commit without having to stage any changes.''')
+            
+        print
+        exit_val += 1
+
+try:
+    answer = raw_input(textwrap.dedent('''\
+        Did you run
+    
+        git log -p --reverse origin/master..HEAD
+    
+        to check your commits and their associated diffs in your branch?
+        [y/n]
+    '''))
+except EOFError:
+    # Since we read from stdin already, we don't want this to prevent
+    # the user from answering the query above
+    answer = raw_input()
+
+is_yes = check_yes_answer(answer)
+
+if not is_yes:
+    print
+    print textwrap.dedent('''\
+        Run that command to check your commit messages and diffs before
+        pushing up to the remote.''')
+    print
+    exit_val += 1
+
+if exit_val > 0:
+    print 'push attempt rejected.'
+
+sys.exit(exit_val)

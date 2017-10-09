@@ -1,0 +1,552 @@
+#!/usr/bin/env python
+
+"""
+This can be used as a commit-msg hook in git. It takes the file name
+that contains the commit message string as a parameter.
+
+This can be added to a repository by copying this script to
+$GIT_DIR/hooks/commit-msg and setting the executable permission.
+
+Alternatively, you can set the core.hooksPath config value by running:
+
+    git config --global --add core.hooksPath "/path/to/githooks"
+
+and then copy this file to that path under the name commit-msg and set the
+executable permission.  This allows for using this hook in all of your
+repositories.
+
+Python 2.7.x is required to run this hook. Python 2.6.x will not work.
+
+The following rules are enforced by not allowing the commit to be written:
+
+    * Title is 50 characters or less
+    * Title first word is capitalized
+    * Title first word indicates imperative mood
+    * Title does not end in punctuation/white space
+    * If meant to be a fixup or squash commit, then it's well formed
+    * fixup or squash commit title match a previous commit title in the
+      branch
+    * Title is useful (not Initial commit, First attempt, etc.)
+    * Second line must be blank if commit message has a body
+
+The following rules result in a message to std out when committing and
+still allow the commit to be written to disk:
+
+    * Commit message should have a body explaining what and why
+    * Commit message body wrapped to 72 characters
+
+You can also test your commit message by saving it to a file and running
+this script with that file name as the first parameter.  An exit status
+of 0 means your commit would be accepted.  A non-zero exit status would
+mean that it would be rejected.  You will also see any applicable errors
+and/or warnings printed to stdout.
+"""
+
+import re
+import subprocess
+import shlex
+import sys
+import textwrap
+
+def title_too_long(title):
+    """Check if title length is 50 characters or less
+
+    Checks the length of the commit title (first line of the commit
+    message).  If the commit title is prefixed with "fixup! " or
+    "squash !", it takes that into account for the allowed length so
+    that those types of commits aren't rejected.
+
+    Args:
+        title: The first line of the commit message
+
+    Returns:
+        True, error string If the title is too long
+        False, '' if the title is not too long
+    """
+    error = ''
+    if (
+            len(title) > 58 and title.startswith('squash! ') or
+            len(title) > 57 and title.startswith('fixup! ') or
+            len(title) > 50):
+        error = textwrap.dedent('''\
+            ERROR: Commit title too long; length must be:
+            * 50 characters or less
+            * 57 characters or less when starting with "fixup! "
+            * 58 characters or less when starting with "squash! "
+        ''')
+        return True, error
+    return False, error
+
+
+def title_first_word_lowercase(title):
+    """Check if the first word of title is capitalized
+
+    Checks the first word of the commit title is capitalized. If the
+    commit title is prefixed with "fixup! " or "squash !", it takes that
+    into account so that those types of commits aren't rejected.
+
+    Args:
+        title: The first line of the commit message
+
+    Returns:
+        True, error_string if first word doesn't start with a capital
+        letter
+        False, '' if the first word does start with a capital letter
+    """
+    error = ''
+    if (
+            not title.startswith('fixup! ') and
+            not title.startswith('squash! ') and
+            not re.match(r'^[A-Z][a-z]+', title)):
+        error = 'ERROR: Commit message title first word must be capitalized'
+        return True, error
+    return False, error
+
+
+def title_not_imperative_mood(title):
+    """Check if the commit message title is in the imperative mood
+
+    Checks the first word of the commit title is in the imperative mood
+    which basically checks that the word does not end in "ed" or "ing".
+    If the commit title is prefixed with "fixup! " or "squash !", it
+    takes that into account so that those types of commits aren't
+    rejected.
+
+    Args:
+        title: The first line of the commit message
+
+    Returns:
+        True, error_string if first word is not in the imperative mood
+        False, '' if the first word is in the imperative mood
+    """
+    error = ''
+    if (
+            not title.startswith('fixup! ') and
+            not title.startswith('squash! ') and
+            re.match(r'^[A-z]+(?:ing|ed)\b', title)):
+        error = 'ERROR: Commit message title first word must be in imperative tense'
+        return True, error
+    return False, error
+
+
+def title_ends_in_punctuation(title):
+    """Check if the commit message title ends in punctuation
+
+    Checks the last character of the commit message title is not a
+    letter.
+
+    Args:
+        title: The first line of the commit message
+
+    Returns:
+        True, error_string if last character is not a letter
+        False, '' if the last character is a letter
+    """
+    error = ''
+    if re.search(r'\W$', title):
+        error = 'ERROR: Commit message title must not end in punctuation'
+        return True, error
+    return False, error
+
+
+def title_has_malformed_fixup_or_squash(title):
+    """Check if the commit message title isn't a proper fixup or squash
+
+    Checks whether a commit has an incorrect prefix for a fixup or
+    squash commit.  Basically, things like Fixup, 'fixup ', etc.
+
+    Args:
+        title: The first line of the commit message
+
+    Returns:
+        True, error_string if this isn't a properly formatted fixup or
+        squash commit
+        False, '' if this isn't a malformed fixup or squash commit
+    """
+    error = ''
+
+    bad_prefixes = [
+        'Fixup',
+        'Squash',
+        'fixup ',
+        'squash ',
+        '!fixup',
+        '!Fixup',
+        '!squash',
+        '!Squash',
+    ]
+    bad_prefix_msg = textwrap.dedent('''\
+        ERROR: Use the "fixup! " or "squash! " prefix along with the commit
+        title it applies so that running:
+
+        git rebase -i --autosquash --keep-empty origin/<upstream_branch>
+
+        will work as expected''')
+    for bad_prefix in bad_prefixes:
+        if not title.startswith(bad_prefix):
+            continue
+        error = bad_prefix_msg
+        return True, error
+
+    if title in ['fixup!', 'squash!']:
+        error = bad_prefix_msg
+        return True, error
+
+    return False, error
+
+
+def title_indicates_multiple_commits(title):
+    """Check if commit title indicates a need to split the commit
+
+    Commits should be limited to a single logical change.  Certain
+    phrases in the title usually indicate that the commit is making
+    multiple logical changes which could be split up into multiple
+    commits.  Check for certain phrases or punctuation as a crude
+    heuristic to determine this.
+
+    Args:
+        title: First line of commit message
+
+    Returns:
+        True, error string if commit should be split
+        False, '' if commit message doesn't indicate the need to split
+
+    """
+    error = ''
+    joining_phrase = [
+        '. ',
+        ';',
+        ' also ',
+        ' Also ',
+        ' and ',
+        ' And ',
+    ]
+    for j in joining_phrase:
+        if j not in title:
+            continue
+        error = textwrap.dedent('''\
+            ERROR: This commit could probably be separated into
+            different commits''')
+        return True, error
+    return False, error
+
+
+def title_indicates_fixup_or_squash(title):
+    """Check if commit should be a fixup or squash commit
+
+    Commits that are titled "Address comments", "Review updates", etc should be
+    titles as a "fixup! " or "squash! " commit.  A crude heuristic to determine
+    whether the commit meets the criteria for that type of commit is used to
+    determine this.
+
+    Args:
+        title: First line of commit message
+
+    Return:
+        True, error_string if the commit should be a fixup or squash commit
+        False, '' if the commit looks good as is
+    """
+    error = ''
+    phrases = [
+        'Address',
+        'address',
+        'Review',
+        'review',
+    ]
+
+    for p in phrases:
+        if not title.startswith(p):
+            continue
+        error = textwrap.dedent('''\
+            ERROR: This most likely should be a "fixup! " or "squash! " commit.
+            Change the title to start with one of those prefixes and append the
+            title of the commit you plan to apply this commit to when
+            rebasing''')
+        return True, error
+    return False, error
+
+
+def _get_branch_commit_titles():
+    """Run git log --format=%s origin/master..HEAD to get commit titles
+
+    This will query git to get the commit titles in this branch
+
+    Returns:
+        A list of strings where each one is a commit title
+
+    Raises:
+        subprocess.CalledProcessError if git log returns a non-zero exit status
+    """
+    git_log_cmd = shlex.split('git log --format=%s origin/master..HEAD')
+    return subprocess.check_output(git_log_cmd).splitlines()
+
+
+def fixup_squash_title_no_match_previous(title, previous_titles):
+    """Check appended title  to "fixup! " or "squash! " matches previous title
+
+    A fixup or squash commit title must match a previous commit title in the
+    branch for it to apply.  Check whether this is the case.
+
+    Args:
+        title: First line of commit message
+        previous_titles: A list of previous commit titles in the branch
+
+    Returns:
+        True, error_str if the title doesn't match a previous commit title
+        False, '' if the title does match one of the previous commit titles
+
+    Raises:
+        subprocess.CalledProcessError (see _get_branch_commit_titles)
+    """
+    error = ''
+    commit_title = None
+    if title.startswith('fixup! ') or title.startswith('squash! '):
+        commit_title = re.split('! ', title, 1)[1]
+
+    if commit_title and commit_title not in previous_titles:
+        error = textwrap.dedent('''\
+            ERROR: The "fixup! " or "squash! " commit title does not match any
+            commit titles in the current branch''')
+        return True, error
+    return False, error
+
+
+def bad_title(title):
+    """Check for an uninformative commit title
+
+    Commit titles such as initial commit, attempt to ..., first pass,
+    etc are not informative and could be improved to describe the actual
+    issue and reason for the change.
+
+    Args:
+        title: Title of the commit
+
+    Returns:
+        True, error_msg if the commit title contains something that
+            indicates it may not be informative
+        False, '' if the commit title appears okay
+    """
+    useless_phrases = [
+        'Attempt',
+        'attempt',
+        'First',
+        'first',
+        'Commit',
+        'commit',
+        'Initial',
+        'initial',
+        'Pass',
+        'pass',
+    ]
+
+    error = ''
+    for useless_phrase in useless_phrases:
+        if useless_phrase not in title:
+            continue
+        error = textwrap.dedent('''\
+            ERROR: Commit title and commit message body should describe
+            what's changing and why the change is being made.  Phrases
+            such as "Initial commit", for example, do not really fulfill
+            that purpose''')
+        return True, error
+    return False, error
+
+
+def commit_message_lacks_body(commit_msg_lines):
+    """
+    Check whether the commit message has a body
+
+    In most cases, the commit message should have a body where details about
+    what was done and why it was done that way are explained.  This won't
+    prevent the commit from being written if the body is missing, but it will
+    return a message noting the issue if the body is missing.
+
+    Args:
+        commit_msg_lines: The commit message split by line
+
+    Return: False, warning_str if there isn't a commit message body
+            False, '' if there is a commit message body
+    """
+    warning = ''
+    if len(commit_msg_lines) <= 2:
+        warning = textwrap.dedent('''\
+            WARNING: Missing commit message body. Use it to explain what you
+            did and why.  For "fixup! " or "squash! " commits, briefly explain
+            what you changed''')
+    return False, warning
+
+
+def check_second_line_empty(commit_msg_lines):
+    """Check whether second line in commit message is empty
+
+    If a commit message has a body, it should be separated from the
+    title by a blank line.
+
+    Args:
+        commit_msg_lines: List of strings making up the commit message
+
+    Returns:
+        True, error_msg if the commit message has more than one line and
+            the second line is not blank
+        False, '' if the commit message has a blank second line
+    """
+    error = ''
+    if (
+            len(commit_msg_lines) > 1 and
+            not re.match(r'^$', commit_msg_lines[1])):
+        error = textwrap.dedent('''\
+            ERROR: A blank line must separate the title and body of the
+            commit message''')
+        return True, error
+    return False, error
+
+
+def check_long_body_lines(commit_msg_lines):
+    """Check whether commit message body lines are longer than 72 characters
+
+    Normally, the commit message body is wrapped at 72 characters.
+    There are exceptions such as pasted URLs, log lines, code fragments
+    that may exceed this length.  Due to that reason, this method
+    doesn't consider longer lines an error, but it will return a warning
+    message in that case.
+
+    Args:
+        commit_msg_lines: A list of lines making up the commit message
+
+    Returns:
+        False, error_msg if there are long lines
+        False, '' if all lines are 72 characters or less
+    """
+    warning = ''
+    for line in commit_msg[2:]:
+        if len(line) <= 72:
+            continue
+        warning = textwrap.dedent('''\
+            WARNING: commit message body lines greater than 72
+            characters.''')
+        break
+    return False, warning
+
+
+def main(commit_msg_lines):
+    """Main method that runs all the commit message checks
+
+    Args:
+        commit_msg_lines: List of strings making up commit message
+
+    Returns:
+        0 if no errors
+        1 if there are errors
+    """
+
+    bad_commit = False
+    error_messages = []
+    warning_messages = []
+    
+    # Check title length
+    error, error_msg = title_too_long(commit_msg_lines[0])
+    bad_commit = bad_commit or error
+    error_messages.append(error_msg)
+    
+    # Check capitalization
+    error, error_msg = title_first_word_lowercase(commit_msg_lines[0])
+    bad_commit = bad_commit or error
+    error_messages.append(error_msg)
+    
+    # Check imperative mood
+    error, error_msg = title_not_imperative_mood(commit_msg_lines[0])
+    bad_commit = bad_commit or error
+    error_messages.append(error_msg)
+    
+    # Check for ending punctuation
+    error, error_msg = title_ends_in_punctuation(commit_msg_lines[0])
+    bad_commit = bad_commit or error
+    error_messages.append(error_msg)
+    
+    # Check for malformed fixup or squash
+    error, error_msg = title_has_malformed_fixup_or_squash(commit_msg_lines[0])
+    bad_commit = bad_commit or error
+    error_messages.append(error_msg)
+    
+    # Check if commit message title makes it look like commit is doing more than
+    # one thing
+    error, error_msg = title_indicates_multiple_commits(commit_msg_lines[0])
+    bad_commit = bad_commit or error
+    error_messages.append(error_msg)
+    
+    # Check if commit should be a fixup or squash commit
+    # TODO: Come up with a better heuristic to detect this by going through
+    # commit histories of various projects
+    error, error_msg = title_indicates_fixup_or_squash(commit_msg_lines[0])
+    bad_commit = bad_commit or error
+    error_messages.append(error_msg)
+    
+    # Check if fixup! or squash! matches a previous commit message title in this
+    # branch
+    previous_commit_titles = []
+    try:
+        previous_commit_titles = _get_branch_commit_titles()
+    except subprocess.CalledProcessError:
+        print textwrap.dedent('''\
+            WARNING: Unable to retrieve previous commits in this
+            branch''')
+
+    error, error_msg = fixup_squash_title_no_match_previous(
+        commit_msg_lines[0], previous_commit_titles)
+    bad_commit = bad_commit or error
+    error_messages.append(error_msg)
+    
+    # Check title for useless phrases
+    error, error_msg = bad_title(commit_msg_lines[0])
+    bad_commit = bad_commit or error
+    error_messages.append(error_msg)
+
+    # Check if body present
+    warning, warning_msg = commit_message_lacks_body(commit_msg_lines)
+    warning_messages.append(warning_msg)
+
+    # Check for blank line
+    error, error_msg = check_second_line_empty(commit_msg_lines)
+    bad_commit = bad_commit or error
+    error_messages.append(error_msg)
+    
+    # Check if subsequent lines are 72 characters or less. We don't exit
+    # with a non-zero status code here because sometimes urls, logs, or
+    # error messages need to be quoted that can exceed that line length
+    warning, warning_msg = check_long_body_lines(commit_msg_lines)
+    warning_messages.append(warning_msg)
+
+    errors = filter(lambda l: l, error_messages)
+    warnings = filter(lambda l: l, warning_messages)
+
+    if errors:
+        print 'ERRORS'
+        print '\n'.join(errors)
+        print
+
+
+    if warnings:
+        print 'WARNINGS'
+        print '\n'.join(warnings)
+        print
+
+    print textwrap.dedent('''\
+        Make sure your commit message explains what you did and why you
+        did it in the commit before pushing to the remote.  You can
+        amend it before pushing to fix it.''')
+
+
+    if bad_commit:
+        print
+        print 'Your commit was rejected.'
+        return 1
+    return 0
+
+if __name__ == '__main__':
+    with open(sys.argv[1]) as f:
+        commit_msg = f.readlines()
+
+    commit_msg = map(lambda l: l.rstrip('\n'), commit_msg)
+    commit_msg = filter(lambda l: not l.startswith('#'), commit_msg)
+
+    sys.exit(main(commit_msg))

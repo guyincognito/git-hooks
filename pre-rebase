@@ -1,0 +1,111 @@
+#!/usr/bin/env python
+
+"""
+This can be used as a pre-rebase hook in git. 
+
+This is used to ask the user if they're rebasing to update a commit
+message or code instead of using a "fixup! " or "squash! " commit.  This
+will also remind the user to run:
+
+git diff <remote_tracking_branch>..HEAD
+
+To check the diff in order to verify that the rebase did not introduce
+an inadvertent code change.  It will also remind the user to run:
+
+git log -p --reverse origin/<upstream_branch>..HEAD
+
+to check the commit messages and associated diffs before pushing to the
+remote.
+
+This can be added to a repository by copying this script to
+$GIT_DIR/hooks/pre-rebase and setting the executable permission.
+
+Alternatively, you can set the core.hooksPath config value by running:
+
+    git config --global --add core.hooksPath "/path/to/githooks"
+
+and then copy this file to that path under the name pre-rebase and set
+the executable permission.  This allows for using this hook in all of
+your repositories.
+"""
+
+import sys
+import textwrap
+
+def check_yes_answer(answer):
+    """Checks whether answer provided means "yes"
+
+    Args:
+        answer: Input provided by user
+
+    Returns:
+        True if answer means yes
+        False otherwise
+    """
+    return answer in ['y', 'Y', 'yes', 'Yes']
+
+exit_val = 0
+answer = raw_input(textwrap.dedent('''\
+    If your code is currently under review and you're addressing a
+    review comment, then are you just updating code or a commit message
+    by running git rebase <upstream_branch> or git commit --amend?
+    [y/n]'''))
+
+is_yes = check_yes_answer(answer)
+
+if is_yes:
+    print
+    print textwrap.dedent('''\
+        You should use a "fixup! " commit to update code, or a
+        "squash! " commit to update the commit message instead of
+        rebasing.  You should only rebase when a review is complete and
+        you're ready to merge your pull request.
+
+        To fix this, you can run the following command:
+
+            git reset origin/<your-branch-name>
+
+        This will unstage your changes and reset the branch to the
+        commit it was on when you last pushed to the remote.  You can
+        then incrementally stage your changes by running:
+
+            git add -i <filename>
+
+        and them making your fixup commit(s)
+
+        If you're just updating the commit message, then you can run the
+        reset command above, and, without staging anything, make a
+        "squash! " commit by running:
+
+            git commit --allow-empty
+
+        the --allow-empty parameter lets you make a commit without
+        having to stage any changes.
+        ''')
+    print
+    exit_val += 1
+
+if exit_val == 0:
+    print textwrap.dedent('''\
+        Run:
+    
+            git diff origin/<current_branch_name>..<current_branch_name>
+        
+        and check whether there is a diff.  If there is and someone else
+        has not merged their branch into master since you created your
+        branch for your pull request, then you need to run:
+    
+            git reset --hard origin/<current_branch_name>
+    
+        and ask someone for assistance to help you rebase.
+    
+        Also, after you have successfully rebased, run:
+    
+            git log -p --reverse origin/master
+    
+        to check your commit messages and associated diffs before
+        pushing your rebased branch up to the remote.''')
+if exit_val > 0:
+    print 'rebase attempt rejected'
+
+sys.exit(exit_val)
