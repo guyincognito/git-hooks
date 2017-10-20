@@ -32,6 +32,32 @@ your repositories.
 import sys
 import textwrap
 
+def has_fetched():
+    """Check if a git fetch/pull origin has been recently run
+
+    Verify whether the user has run git fetch origin or git pull origin
+    before allowing the rebase to proceed.  If a PR has been merged into
+    the master branch since this branch has been created, then we want
+    to incorporate those changes into this branch before we do the
+    rebase.
+
+    Returns:
+        True if the remote and remote tracking branch point to the same
+        commit
+        False otherwise
+    """
+    remote_sha1_cmd = 'git ls-remote origin master'
+    local_sha1_cmd = 'git show -s --format="%H" origin/master'
+
+    remote_sha1 = subprocess.check_output(shlex.split(
+        remote_sha1_cmd)).split()[0]
+
+    local_sha1 = subprocess.check_output(
+        shlex.split(local_sha1_cmd)).rstrip()
+
+    return local_sha1 == remote_sha1
+
+
 def check_yes_answer(answer):
     """Checks whether answer provided means "yes"
 
@@ -45,6 +71,24 @@ def check_yes_answer(answer):
     return answer in ['y', 'Y', 'yes', 'Yes']
 
 exit_val = 0
+
+if not has_fetched():
+    print textwrap.dedent('''\
+        It appears that you haven't run
+
+            git fetch origin
+
+        or
+
+            git pull origin
+
+        before attempting to rebase.  Please run one of those commands
+        before rebasing.  This will ensure that your branch will contain
+        the latest changes in the master branch after the rebase is
+        complete''')
+    print
+    exit_val += 1
+    
 answer = raw_input(textwrap.dedent('''\
     If your code is currently under review and you're addressing a
     review comment, then are you just updating code or a commit message
