@@ -1,0 +1,37 @@
+#!/usr/bin/env python
+
+"""
+This can be used as a post-commit hook in git. 
+
+This is used to remind the user to link the sha1 of the fixup! or
+squash! commit they just made in their open pull request that's under
+active review.  It outputs the abbreviated sha1 on a single line for
+easy copying.
+
+This can be added to a repository by copying this script to
+$GIT_DIR/hooks/post-commit and setting the executable permission.
+
+Alternatively, you can set the core.hooksPath config value by running:
+
+    git config --global --add core.hooksPath "/path/to/githooks"
+
+and then copy this file to that path under the name post-commit and set
+the executable permission.  This allows for using this hook in all of
+your repositories.
+"""
+
+import shlex
+import subprocess
+import textwrap
+
+# Check the commit message of the latest commit
+
+cmd = 'git show -s --format="%h" HEAD'
+sha1 = subprocess.check_output(shlex.split(cmd))
+
+print textwrap.dedent('''\
+    If the commit you just made is addressing a comment, don't forget to
+    respond to it in Github with the sha1 of the commit you just made
+    which is shown below for your convenience:
+
+    {sha1}'''.format(sha1=sha1))

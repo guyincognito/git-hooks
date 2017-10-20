@@ -1,0 +1,138 @@
+#!/usr/bin/env python
+
+"""
+This can be used as a post-rewrite hook in git. 
+
+This is used to encourage the user to use a fixup! or squash! commit
+instead of using git commit --amend or git rebase.
+
+This can be added to a repository by copying this script to
+$GIT_DIR/hooks/post-rewrite and setting the executable permission.
+
+Alternatively, you can set the core.hooksPath config value by running:
+
+    git config --global --add core.hooksPath "/path/to/githooks"
+
+and then copy this file to that path under the name post-rewrite and set
+the executable permission.  This allows for using this hook in all of
+your repositories.
+"""
+
+import shlex
+import sys
+import subprocess
+import textwrap
+
+def autosquashed(rewritten_commits):
+    """Checks if the rebase operation squashed any commits
+
+    This runs a check on the list of commits in the rebase and determine
+    whether autosquash was used or not.  This is done by checking if the
+    commit titles of commits in the old_sha1 set are prefixed with
+    "fixup! " or "squash! " and that they match the title of the commit
+    pointed to by the new_sha1
+
+    Args:
+        rewritten_commits: A list of lines consisting of
+
+                <old_sha1> <new_sha1>
+
+        where <old_sha1> is the sha1 of the commit before the rebase and
+        <new_sha1> is the sha1 of the commit after the rebase
+
+    Returns:
+        True if this is an autosquash
+        False otherwise
+    """
+    autosquashed = True
+    fixup_or_squash = False
+    title_cmd = 'git show -s --format=%s {sha1}'
+
+    for rewritten_commit in rewritten_commits:
+        old_sha1, new_sha1 = rewritten_commit.split()
+
+        old_title = subprocess.check_output(
+            shlex.split(title_cmd.format(sha1=old_sha1)))
+        new_title = subprocess.check_output(
+            shlex.split(title_cmd.format(sha1=new_sha1)))
+
+        if old_title != new_title:
+            if (
+                    old_title.startswith('fixup! ') or
+                    old_title.startswith('squash! ')):
+                fixup_or_squash = True
+                commit_title = re.split('! ', old_title, 1)[1]
+                if commit_title != new_title:
+                    autosquashed = False
+            else:
+                autoquashed = False
+
+        if not fixup_or_squash:
+            autosquashed = False
+
+        return autosquashed
+
+command = sys.argv[1]
+
+rewritten_commits = sys.stdin.readlines()
+rewritten_commits = map(lambda l: l.rstrip(), rewritten_commits)
+
+if command == 'amend':
+    print textwrap.dedent('''\
+        If your PR is under active review, then please note the
+        following:
+
+        You just amended your most recent commit.  Instead of
+        doing that and force-pushing your branch to the remote, you
+        should make a "fixup! " commit if you have code changes.  You
+        can do this by running:
+
+            git reset HEAD@{1}
+
+        This will unstage your changes and reset the HEAD of the current
+        branch back to the commit before you ran git commit --amend.
+        You can then stage your changes and make a "fixup! " commit.
+
+        If you just want to change your commit message and not make any
+        code changes, then you should make a "squash! " commit instead.
+        You can do this by running the same git reset command above.
+        You can then run:
+
+            git commit --allow-empty
+
+        and create your squash commit.''')
+elif command == 'rebase':
+    is_autosquashed = autosquashed(rewritten_commits)
+
+    if not is_autosquashed:
+        print textwrap.dedent('''\
+            If your PR is under active review, then please note the
+            following:
+
+            You just rebased without using the --autosquash option, or
+            you manually re-ordered the commits during the rebase
+            despite using the --autosquash option.
+
+            If you're doing this to update some code, then please make a
+            "fixup! " commit to do so.  You can unstage your changes and
+            go back to the commit before you ran git rebase by running:
+
+                git reset origin/<your-branch-name>
+
+            where <your-branch-name> represents the branch you currently
+            have checked out.
+
+            You can then incrementally stage your changes by running
+
+                git add -p <file_name>
+
+            and make some fixup commits.
+
+            On the other hand, if you're doing this to update a commit
+            message, then please make a "squash! " commit without
+            staging any changes.  You can do this by running the same
+            git reset command above and then running:
+
+                git commit --allow-empty
+
+            and make a squash commit.''')
